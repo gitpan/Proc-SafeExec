@@ -4,7 +4,7 @@ use 5.006;
 use strict;
 use warnings;
 
-our $VERSION = '1.0';
+our $VERSION = '1.1';
 
 =pod
 
@@ -29,6 +29,7 @@ Proc::SafeExec - Convenient utility for executing external commands in various w
 
 		# Miscellaneous options.
 		child_callback => \&fref,  # Specify a function to call in the child after fork(), for example, to drop privileges.
+		debug => 1,  # Emit some information via warnings, such as the command to execute.
 		no_autowait => 1,  # Don't automatically call $command->wait() when $command is destroyed.
 		real_arg0 => "/bin/ls",  # Specify the actual file to execute.
 		untaint_args => 1,  # Untaint the arguments before exec'ing.
@@ -130,13 +131,15 @@ To test the module, run the following command line:
 
 =over
 
+=item * Version 1.1, released 2008-01-09.  Fixed obvious bug.
+
 =item * Version 1.0, released 2007-05-23.
 
 =back
 
 =head1 SEE ALSO
 
-The Subversion repository is at svn://svn.devpit.org/Proc-SafeExec/
+The source repository is at git://git.devpit.org/Proc-SafeExec/
 
 =head1 AUTHOR
 
@@ -193,11 +196,19 @@ sub new {
 	$options = {%$options};
 
 	# Usage checks; set defaults.
+	$self->{"debug"} = $options->{"debug"};
 	$options->{"stdin"} = "default" unless defined $options->{"stdin"};
 	$options->{"stdout"} = "default" unless defined $options->{"stdout"};
 	$options->{"stderr"} = "default" unless defined $options->{"stderr"};
 	die "No action specified for child process\n" unless $options->{"exec"} or $options->{"fork"};
 	die "More than one action specified for child process\n" if $options->{"exec"} and $options->{"fork"};
+	warn "Executing:  @{$options->{'exec'}}\n" if $self->{"debug"} and $options->{"exec"};
+	if($options->{"exec"}) {
+		my $count = -1;
+		while(++$count < @{$options->{"exec"}}) {
+			die "Argument ${count} to exec is undef\n" unless defined $options->{"exec"}[$count];
+		}
+	}
 
 	# Regarding file handles, $self holds the side that the parent will see and
 	# $options holds the side that the child will see.  Remember, if we're passed a
@@ -218,7 +229,7 @@ sub new {
 	} elsif($options->{"stdin"} eq "default") {
 		# Empty
 	} else {
-		die "Unknown option for stdin:  $options->{'stdin'}";
+		die "Unknown option for stdin:  $options->{'stdin'}\n";
 	}
 	if(ref $options->{"stdout"}) {
 		# Empty
@@ -234,7 +245,7 @@ sub new {
 	} elsif($options->{"stdout"} eq "default") {
 		# Empty
 	} else {
-		die "Unknown option for stdout:  $options->{'stdout'}";
+		die "Unknown option for stdout:  $options->{'stdout'}\n";
 	}
 	if(ref $options->{"stderr"}) {
 		# Empty
@@ -250,7 +261,7 @@ sub new {
 	} elsif($options->{"stderr"} eq "default") {
 		# Empty
 	} else {
-		die "Unknown option for stderr:  $options->{'stderr'}";
+		die "Unknown option for stderr:  $options->{'stderr'}\n";
 	}
 
 	# Set the close-on-exec flag for both ends in both processes since the child
@@ -403,6 +414,7 @@ sub wait {
 	die "Child was already waited on without calling the wait method\n" if $waitpid == -1;
 	return undef if $waitpid == 0;  # Child didn't exit yet.
 	$self->{"exit_status"} = $?;
+	warn sprintf("Exit status was %s (%s)", $?, ($? >> 8)) if $self->{"debug"};
 	return 1;
 }
 
