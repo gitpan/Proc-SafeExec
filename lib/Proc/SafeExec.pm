@@ -4,7 +4,7 @@ use 5.006;
 use strict;
 use warnings;
 
-our $VERSION = '1.1';
+our $VERSION = '1.2';
 
 =pod
 
@@ -131,6 +131,9 @@ To test the module, run the following command line:
 
 =over
 
+=item * Version 1.2, released 2008-01-22.  Tweaked test() to handle temp files
+correctly, addressing https://rt.cpan.org/Ticket/Display.html?id=32458 .
+
 =item * Version 1.1, released 2008-01-09.  Fixed obvious bug.
 
 =item * Version 1.0, released 2007-05-23.
@@ -182,6 +185,8 @@ Leif Pedersen, E<lt>bilbo@hobbiton.orgE<gt>
 =cut
 
 use Fcntl "F_GETFL", "F_SETFL", "FD_CLOEXEC";
+use File::Spec;
+use File::Temp;
 use POSIX "WNOHANG";
 
 sub new {
@@ -446,8 +451,8 @@ sub test {
 	my $test = "";
 
 	# Test case for ls | sort > /tmp/Proc-SafeExec-test1.txt
+	my ($output_fh, $output_filename) = File::Temp::tempfile("Proc-SafeExec.XXXXXXXXXXXXXXXX", SUFFIX => ".txt", DIR => File::Spec->tmpdir());
 	eval {
-		open my $output_fh, ">", "/tmp/Proc-SafeExec-test1.txt" or die "/tmp/Proc-SafeExec-test1.txt:  $!\n";
 		my $ls = new Proc::SafeExec({exec => ["ls"], stdout => "new"});
 		my $sort = new Proc::SafeExec({exec => ["sort"], stdin => $ls->stdout, stdout => $output_fh});
 		$ls->wait() or die '$ls->wait() returned false';
@@ -455,13 +460,14 @@ sub test {
 		$ls->exit_status and die "ls exited with status " . $ls->exit_status;
 		$sort->exit_status and die "sort exited with status " . $sort->exit_status;
 	};
+	unlink($output_filename);
 	$test .= "$@not " if $@;
 	$test .= "ok - ls | sort > /tmp/Proc-SafeExec-test1.txt\n";
 
 	# Another test case for ls | sort > /tmp/Proc-SafeExec-test2.txt
 	# This one will deadlock if the parent doesn't close stdin.
+	($output_fh, $output_filename) = File::Temp::tempfile("Proc-SafeExec.XXXXXXXXXXXXXXXX", SUFFIX => ".txt", DIR => File::Spec->tmpdir());
 	eval {
-		open my $output_fh, ">", "/tmp/Proc-SafeExec-test2.txt" or die "/tmp/Proc-SafeExec-test2.txt:  $!\n";
 		my $sort = new Proc::SafeExec({exec => ["sort"], stdin => "new", stdout => $output_fh});
 		my $ls = new Proc::SafeExec({exec => ["ls"], stdout => $sort->stdin});
 		$ls->wait() or die '$ls->wait() returned false';
@@ -469,6 +475,7 @@ sub test {
 		$ls->exit_status and die "ls exited with status " . $ls->exit_status;
 		$sort->exit_status and die "sort exited with status " . $sort->exit_status;
 	};
+	unlink($output_filename);
 	$test .= "$@not " if $@;
 	$test .= "ok - ls | sort > /tmp/Proc-SafeExec-test2.txt\n";
 
