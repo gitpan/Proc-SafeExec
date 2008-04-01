@@ -4,7 +4,7 @@ use 5.006;
 use strict;
 use warnings;
 
-our $VERSION = '1.2';
+our $VERSION = '1.3';
 
 =pod
 
@@ -34,7 +34,7 @@ Proc::SafeExec - Convenient utility for executing external commands in various w
 		real_arg0 => "/bin/ls",  # Specify the actual file to execute.
 		untaint_args => 1,  # Untaint the arguments before exec'ing.
 	});
-	printf "Child's PID is %s\n", $command->child_pid if $command->child_pid;
+	printf "Child's PID is %s\n", $command->child_pid() if $command->child_pid();
 
 The wait method waits for the child to exit or checks whether it already
 exited:
@@ -47,22 +47,22 @@ exited:
 
 To communicate with the child:
 
-	# Perl doesn't understand <$command->stdout>.
-	my $command_stdout = $command->stdout;
-	my $command_stderr = $command->stderr;
+	# Perl doesn't understand <$command->stdout()>.
+	my $command_stdout = $command->stdout();
+	my $command_stderr = $command->stderr();
 
 	$line = <$command_stdout>;
 	$line = <$command_stderr>;
-	print {$command->stdin} "mumble\n";
+	print {$command->stdin()} "mumble\n";
 
 To check whether the child exited yet:
 
-	print "Exit status:  ", $command->exit_status, "\n" if $command->wait({nonblock => 1});
+	print "Exit status:  ", $command->exit_status(), "\n" if $command->wait({nonblock => 1});
 
 To wait until it exits:
 
 	$command->wait();
-	print "Exit status:  ", $command->exit_status, "\n";
+	print "Exit status:  ", $command->exit_status(), "\n";
 
 =head1 DESCRIPTION
 
@@ -103,6 +103,13 @@ constructor.  The easiest way to wait for the child is to call the wait method,
 but if you need more control, set no_autowait, then call child_pid to get the
 PID and do the work yourself.
 
+This will emit a warning if the child exits with a non-zero status, and the
+caller didn't inspect the exit status, and the caller didn't specify
+no_autowait (which may imply the exit status might not be meaningful).  It's
+bad practice not to inspect the exit status, and it's easy enough to quiet
+this warning if you really don't want it by calling $command->exit_status()
+and discarding the result.
+
 =head1 EXAMPLES
 
 It's easy to execute several programs to form a pipeline.  For the first
@@ -112,11 +119,11 @@ how to write the equivalent of system("ls | sort > output.txt"):
 
 	open my $output_fh, ">", "output.txt" or die "output.txt:  $!\n";
 	my $ls = new Proc::SafeExec({exec => ["ls"], stdout => "new"});
-	my $sort = new Proc::SafeExec({exec => ["sort"], stdin => $ls->stdout, stdout => $output_fh});
+	my $sort = new Proc::SafeExec({exec => ["sort"], stdin => $ls->stdout(), stdout => $output_fh});
 	$ls->wait();
 	$sort->wait();
-	printf "ls exited with status %i\n", ($ls->exit_status >> 8);
-	printf "sort exited with status %i\n", ($sort->exit_status >> 8);
+	printf "ls exited with status %i\n", ($ls->exit_status() >> 8);
+	printf "sort exited with status %i\n", ($sort->exit_status() >> 8);
 
 =head1 INSTALLATION
 
@@ -131,6 +138,11 @@ To test the module, run the following command line:
 
 =over
 
+=item * Version 1.3, released 2008-03-31.  Added Proc::SafeExec::Queue.  Emit a
+warning when non-zero exit status, and the caller didn't inspect the exit
+status, and the caller didn't specify no_autowait (which may imply the exit
+status might not be meaningful).
+
 =item * Version 1.2, released 2008-01-22.  Tweaked test() to handle temp files
 correctly, addressing https://rt.cpan.org/Ticket/Display.html?id=32458 .
 
@@ -143,6 +155,8 @@ correctly, addressing https://rt.cpan.org/Ticket/Display.html?id=32458 .
 =head1 SEE ALSO
 
 The source repository is at git://git.devpit.org/Proc-SafeExec/
+
+See also Proc::SafeExec::Queue.
 
 =head1 AUTHOR
 
@@ -197,7 +211,9 @@ sub new {
 	bless $self, $class_name;
 
 	# Be sure we don't gain extra references to any file handles or clobber
-	# anything the caller needs.
+	# anything the caller needs.  For example, if the caller holds a reference to
+	# $options and we add a file handle reference to it, the file handle will not
+	# be destroyed when we expect.
 	$options = {%$options};
 
 	# Usage checks; set defaults.
@@ -428,17 +444,38 @@ sub DESTROY {
 
 	return if $self->{"no_autowait"};
 	return unless defined $self->{"child_pid"};  # Haven't forked yet.  (Died during constructor.)
-	return if defined $self->{"exit_status"};  # Already waited on the child.
+	$self->wait() unless defined $self->{"exit_status"};  # Wait for the child so we don't accidentally leave a zombie process.
 
-	# Wait for the child so we don't accidentally leave a zombie process.
-	$self->wait();
+	if($self->{"exit_status"} and not $self->{"fetched_exit_status"}) {
+		# Non-zero exit status, and the caller didn't inspect the exit status, and the
+		# caller didn't specify no_autowait (which may imply the exit status might not
+		# be meaningful).  It's bad practice not to inspect the exit status, so we'll
+		# warn about it.  It's easy enough for the caller to quiet this warning.
+		warn sprintf("Exit status was %s (%s) in " . __PACKAGE__ . ", but nothing ever checked it.  (Call exit_status() to check it.)\n",
+		  $self->{"exit_status"}, ($self->{"exit_status"} >> 8));
+	}
 }
 
-sub stdin { $_[0]->{"stdin"}; }
-sub stdout { $_[0]->{"stdout"}; }
-sub stderr { $_[0]->{"stderr"}; }
-sub child_pid { $_[0]->{"child_pid"}; }
-sub exit_status { $_[0]->{"exit_status"}; }
+sub stdin {
+	return $_[0]->{"stdin"};
+}
+
+sub stdout {
+	return $_[0]->{"stdout"};
+}
+
+sub stderr {
+	return $_[0]->{"stderr"};
+}
+
+sub child_pid {
+	return $_[0]->{"child_pid"};
+}
+
+sub exit_status {
+	$_[0]->{"fetched_exit_status"} = 1 if defined $_[0]->{"exit_status"};
+	return $_[0]->{"exit_status"};
+}
 
 sub _set_cloexec {
 	my ($fh) = @_;
@@ -454,11 +491,11 @@ sub test {
 	my ($output_fh, $output_filename) = File::Temp::tempfile("Proc-SafeExec.XXXXXXXXXXXXXXXX", SUFFIX => ".txt", DIR => File::Spec->tmpdir());
 	eval {
 		my $ls = new Proc::SafeExec({exec => ["ls"], stdout => "new"});
-		my $sort = new Proc::SafeExec({exec => ["sort"], stdin => $ls->stdout, stdout => $output_fh});
+		my $sort = new Proc::SafeExec({exec => ["sort"], stdin => $ls->stdout(), stdout => $output_fh});
 		$ls->wait() or die '$ls->wait() returned false';
 		$sort->wait() or die '$sort->wait() returned false';
-		$ls->exit_status and die "ls exited with status " . $ls->exit_status;
-		$sort->exit_status and die "sort exited with status " . $sort->exit_status;
+		$ls->exit_status() and die "ls exited with status " . $ls->exit_status();
+		$sort->exit_status() and die "sort exited with status " . $sort->exit_status();
 	};
 	unlink($output_filename);
 	$test .= "$@not " if $@;
@@ -469,11 +506,11 @@ sub test {
 	($output_fh, $output_filename) = File::Temp::tempfile("Proc-SafeExec.XXXXXXXXXXXXXXXX", SUFFIX => ".txt", DIR => File::Spec->tmpdir());
 	eval {
 		my $sort = new Proc::SafeExec({exec => ["sort"], stdin => "new", stdout => $output_fh});
-		my $ls = new Proc::SafeExec({exec => ["ls"], stdout => $sort->stdin});
+		my $ls = new Proc::SafeExec({exec => ["ls"], stdout => $sort->stdin()});
 		$ls->wait() or die '$ls->wait() returned false';
 		$sort->wait() or die '$sort->wait() returned false';
-		$ls->exit_status and die "ls exited with status " . $ls->exit_status;
-		$sort->exit_status and die "sort exited with status " . $sort->exit_status;
+		$ls->exit_status() and die "ls exited with status " . $ls->exit_status();
+		$sort->exit_status() and die "sort exited with status " . $sort->exit_status();
 	};
 	unlink($output_filename);
 	$test .= "$@not " if $@;
@@ -494,3 +531,5 @@ sub test {
 
 	return $test;
 }
+
+1
