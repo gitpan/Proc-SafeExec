@@ -4,7 +4,7 @@ use 5.006;
 use strict;
 use warnings;
 
-our $VERSION = '1.3';
+our $VERSION = '1.4';
 
 =pod
 
@@ -63,6 +63,10 @@ To wait until it exits:
 
 	$command->wait();
 	print "Exit status:  ", $command->exit_status(), "\n";
+
+A convenient quick tool for an alternative to $output = `@exec`:
+
+	($output, $?) = Proc::SafeExec::backtick(@exec);
 
 =head1 DESCRIPTION
 
@@ -138,6 +142,11 @@ To test the module, run the following command line:
 
 =over
 
+=item * Version 1.4, released 2008-05-30.  Added Proc::SafeExec::backtick()
+function for convenience.  Fixed a couple minor bugs in error handling (not
+security related).  Invalidate $? after reading it so callers must fetch the
+exit status through $self->exit_status().
+
 =item * Version 1.3, released 2008-03-31.  Added Proc::SafeExec::Queue.  Emit a
 warning when non-zero exit status, and the caller didn't inspect the exit
 status, and the caller didn't specify no_autowait (which may imply the exit
@@ -203,6 +212,8 @@ use File::Spec;
 use File::Temp;
 use POSIX "WNOHANG";
 
+# Remember, any place new() dies or does not return $self triggers DESTROY
+# immediately.
 sub new {
 	my ($package, $options) = @_;
 
@@ -243,8 +254,8 @@ sub new {
 		$options->{"stdin"} = undef;
 		# Careful of the order.  It's pipe README, WRITEME.
 		pipe $options->{"stdin"}, $self->{"stdin"} or die "pipe:  $!\n";
-		_set_cloexec($self->{"stdin"});
-		_set_cloexec($options->{"stdin"});
+		set_cloexec($self->{"stdin"});
+		set_cloexec($options->{"stdin"});
 	} elsif($options->{"stdin"} eq "close") {
 		# Empty
 	} elsif($options->{"stdin"} eq "default") {
@@ -259,8 +270,8 @@ sub new {
 		$options->{"stdout"} = undef;
 		# Careful of the order.  It's pipe README, WRITEME.
 		pipe $self->{"stdout"}, $options->{"stdout"} or die "pipe:  $!\n";
-		_set_cloexec($self->{"stdout"});
-		_set_cloexec($options->{"stdout"});
+		set_cloexec($self->{"stdout"});
+		set_cloexec($options->{"stdout"});
 	} elsif($options->{"stdout"} eq "close") {
 		# Empty
 	} elsif($options->{"stdout"} eq "default") {
@@ -275,8 +286,8 @@ sub new {
 		$options->{"stderr"} = undef;
 		# Careful of the order.  It's pipe README, WRITEME.
 		pipe $self->{"stderr"}, $options->{"stderr"} or die "pipe:  $!\n";
-		_set_cloexec($self->{"stderr"});
-		_set_cloexec($options->{"stderr"});
+		set_cloexec($self->{"stderr"});
+		set_cloexec($options->{"stderr"});
 	} elsif($options->{"stderr"} eq "close") {
 		# Empty
 	} elsif($options->{"stderr"} eq "default") {
@@ -288,8 +299,8 @@ sub new {
 	# Set the close-on-exec flag for both ends in both processes since the child
 	# indicates the success of exec() by closing the pipe.
 	pipe my $error_pipe_r, my $error_pipe_w or die "pipe:  $!\n";
-	_set_cloexec($error_pipe_r);
-	_set_cloexec($error_pipe_w);
+	set_cloexec($error_pipe_r);
+	set_cloexec($error_pipe_w);
 	select((select($error_pipe_w), $| = 1)[0]);  # Set autoflushing for writing.
 
 	$self->{"child_pid"} = fork();
@@ -297,22 +308,22 @@ sub new {
 
 	if($self->{"child_pid"}) {
 		# Parent
+		$self->{"need_wait"} = 1;
 		$error_pipe_w = undef;
 
 		close $options->{"stdin"} if ref $options->{"stdin"};
 		close $options->{"stdout"} if ref $options->{"stdout"};
 		close $options->{"stderr"} if ref $options->{"stderr"};
 
-		# EOF indicates no error.  This blocks until exec() succeeds or fails.  When
-		# $error_pipe_r falls out of scope, it's closed.  Also, when $self isn't
-		# returned, the last ref is lost and DESTROY is called.
+		# EOF indicates no error.  This blocks until exec() succeeds or fails because
+		# in the child, $error_pipe_w automatically closes on exec or exit.
 		if(defined (my $err = <$error_pipe_r>)) {
 			chomp $err;
 			die "$err\n";
 		}
 
-		# Don't set this until just before returning because if the constructor
-		# dies, the child must be cleaned.
+		# Don't set this until just before returning because if the constructor dies,
+		# the child must be cleaned.
 		$self->{"no_autowait"} = $options->{"no_autowait"};
 
 		return $self;
@@ -408,11 +419,15 @@ sub new {
 		die "Can't happen!  No action specified for child process, checked in parent";
 	};
 	if($@) {
-		print $error_pipe_w $@;
-		POSIX::_exit(1);
+		# This exit status isn't returned to the caller because the error in the pipe
+		# causes a die in the parent.  However, if it's non-zero it'll trigger the
+		# warning in $self->DESTROY().  If the write fails, which probably means
+		# something went horribly wrong, we'll let that warning happen, although it
+		# won't make a lot of sense.  XXX: Should this write failure be handled better?
+		print $error_pipe_w $@ or POSIX::exit(1);
+		POSIX::_exit(0);
 	}
-	# This return path happens if $options->{"fork"};
-	return ();
+	die "Can't happen!";
 }
 
 sub wait {
@@ -435,16 +450,21 @@ sub wait {
 	die "Child was already waited on without calling the wait method\n" if $waitpid == -1;
 	return undef if $waitpid == 0;  # Child didn't exit yet.
 	$self->{"exit_status"} = $?;
-	warn sprintf("Exit status was %s (%s)", $?, ($? >> 8)) if $self->{"debug"};
+	$? = -1;  # Invalidate $? so callers don't rely on it since the internal behavior of this method may change in the future.
+	warn sprintf("Exit status was %s (%s)", $self->{"exit_status"}, ($self->{"exit_status"} >> 8)) if $self->{"debug"};
 	return 1;
 }
 
 sub DESTROY {
 	my ($self) = @_;
 
-	return if $self->{"no_autowait"};
-	return unless defined $self->{"child_pid"};  # Haven't forked yet.  (Died during constructor.)
-	$self->wait() unless defined $self->{"exit_status"};  # Wait for the child so we don't accidentally leave a zombie process.
+	# need_wait is set in the parent when the fork() is successful.  This prevents
+	# weird stuff from the object's destruction in the child or when an error
+	# happens before fork().  As far as implementation, no_autowait means the
+	# caller expects the child to out-live the object.
+	if($self->{"need_wait"} and not $self->{"no_autowait"} and not defined $self->{"exit_status"}) {
+		$self->wait();  # Wait for the child so we don't accidentally leave a zombie process.
+	}
 
 	if($self->{"exit_status"} and not $self->{"fetched_exit_status"}) {
 		# Non-zero exit status, and the caller didn't inspect the exit status, and the
@@ -454,6 +474,7 @@ sub DESTROY {
 		warn sprintf("Exit status was %s (%s) in " . __PACKAGE__ . ", but nothing ever checked it.  (Call exit_status() to check it.)\n",
 		  $self->{"exit_status"}, ($self->{"exit_status"} >> 8));
 	}
+	return ();
 }
 
 sub stdin {
@@ -477,11 +498,34 @@ sub exit_status {
 	return $_[0]->{"exit_status"};
 }
 
-sub _set_cloexec {
+
+# Functional (non-OOP) subs follow.
+
+# Private sub.
+sub set_cloexec {
 	my ($fh) = @_;
 	my $fcntl;
 	$fcntl = fcntl($fh, F_GETFL, 0) or die "fcntl: $!\n";
 	$fcntl = fcntl($fh, F_SETFL, $fcntl | FD_CLOEXEC) or die "fnctl: $!\n";
+}
+
+# Equivalent to `@exec`, but with the safety of Proc::SafeExec.
+sub backtick {
+	my @exec = @_;
+
+	my $command = new Proc::SafeExec({
+		exec => [@_],
+		stdout => "new",
+	});
+	my $stdout = $command->stdout();
+	local $/ = undef;
+	my $output = <$stdout>;
+	$command->wait();
+
+	# If the caller uses scalar context, return just $output and warn on nonzero
+	# exit status.
+	return ($output, $command->exit_status()) if wantarray;
+	return $output;
 }
 
 sub test {
